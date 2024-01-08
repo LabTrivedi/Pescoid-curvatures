@@ -13,23 +13,6 @@ from PIL import Image
 import imageio.v2 as imageio
 from scipy.ndimage import gaussian_filter1d
 np.set_printoptions(threshold=sys.maxsize)
-
-def curvaturePoints(b, c, d):
-  temp = c[0]**2 + c[1]**2
-  bc = (b[0]**2 + b[1]**2 - temp) / 2
-  cd = (temp - d[0]**2 - d[1]**2) / 2
-  det = (b[0] - c[0]) * (c[1] - d[1]) - (c[0] - d[0]) * (b[1] - c[1])
-
-  if abs(det) < 1.0e-10:
-    return 0.0
-
-  # Center of circle
-  cx = (bc*(c[1] - d[1]) - cd*(b[1] - c[1])) / det
-  cy = ((b[0] - c[0]) * cd - (c[0] - d[0]) * bc) / det
-
-  radius = ((cx - b[0])**2 + (cy - b[1])**2)**.5
-
-  return 1.0/radius
 def isAtBorder(x, y, impts):
     if impts[x, y] == 0:
         return False
@@ -120,19 +103,10 @@ def sortBorder2(border, dp, ymin, ymax):
     for i in range(1, l):
         crownOfPoints(border, sorted)
     return sorted
-def shift_rows_by_highest_average(arr):
-    # Find the row index with the highest average (ignoring NaN values)
-    avg_values = np.nanmean(arr, axis=1)
-    max_avg_row_index = np.nanargmax(avg_values)
-
-    # Calculate the number of rows to shift
-    num_rows = arr.shape[0]
-    shift_amount = num_rows // 2 - max_avg_row_index
-
+def shift_rows(shift_amount, arr):
     # Roll the array to move the row with the highest average to the center
     shifted_array = np.roll(arr, shift_amount, axis=0)
-
-    return shift_amount, shifted_array
+    return shifted_array
 def calculate_circle_length(positions):
     # Ensure the input array is a numpy array
     positions = np.asarray(positions)
@@ -167,6 +141,21 @@ def read_single_value_from_csv(file_path):
         print(f"Error: File not found - {file_path}")
     except Exception as e:
         print(f"Error: {e}")
+def create_numpy_of_pixel_values(img):
+    sx = img.size[0]
+    sy = img.size[1]
+    impts = np.zeros((sx, sy))
+
+    ymax = -np.Inf
+    ymin = np.Inf
+
+    for x in range(sx):
+        for y in range(sy):
+            impts[x, y] = img.getpixel((x, y))
+            if impts[x, y] == 1:
+                ymin = min(ymin, y)
+                ymax = max(ymax, y)
+    return sx, sy, ymin, ymax, impts
 
 
 # DIRECTORY AND FOLDERS
@@ -174,12 +163,13 @@ directory = "C:/Users/jorfo/OneDrive/Documents/EMBL/Nick_Project/" # Change to y
 folders = ["pescoid_100um", "pescoid_200um", "pescoid_300um", "pescoid_ctrl"] # Edit to add or remove folders to study
 
 # PARAMETERS TO EDIT
-dp = 30 # Number of taken points to compute curvature
+dp = 30 # Number of taken points to compute fluorescence
 lTime = 39 # Number of time frames
 iniTime = 7 # Initial time (in hours)
 dt = 0.5 # Time interval difference (in hours)
 aspect_ratio = 0.3467 # microns per pixel
 dw = 5 # Number of rows for the final plot
+df = 30 # Number of the square of fluorescence of length 2*df+1
 
 # CODE (USUALLY NOT MODIFIED)
 border_length = -1
@@ -211,19 +201,7 @@ for folder in folders:
                 img.load()
 
                 # Save mask values in np
-                sx = img.size[0]
-                sy = img.size[1]
-                impts = np.zeros((sx, sy))
-
-                ymax = -np.Inf
-                ymin = np.Inf
-
-                for x in range(sx):
-                    for y in range(sy):
-                        impts[x, y] = img.getpixel((x, y))
-                        if impts[x, y] == 1:
-                            ymin = min(ymin, y)
-                            ymax = max(ymax, y)
+                sx, sy, impts = create_numpy_of_pixel_values(img)
 
                 # Compute the border of the mask and sort it
                 border_length = 0
@@ -259,20 +237,12 @@ for folder in folders:
             img = Image.open(pathT + con_folder + "_time-" + str(t+1).zfill(3) + "_finalMask.tif")
             img.load()
 
+            img_flu = Image.open(path + con_folder + "/" + con_folder + "_time-" + str(t + 1).zfill(3) + ".tif")
+            img_flu.load()
+
             # Save mask values in np
-            sx = img.size[0]
-            sy = img.size[1]
-            impts = np.zeros((sx, sy))
-
-            ymax = -np.Inf
-            ymin = np.Inf
-
-            for x in range(sx):
-                for y in range(sy):
-                    impts[x, y] = img.getpixel((x, y))
-                    if impts[x, y] == 1:
-                        ymin = min(ymin, y)
-                        ymax = max(ymax, y)
+            sx, sy, ymin, ymax, impts = create_numpy_of_pixel_values(img)
+            _, _, _, _, impts_flu = create_numpy_of_pixel_values(img_flu)
 
             # Comput the border of the mask and sort it
             border = []
@@ -287,34 +257,33 @@ for folder in folders:
             lBorder = len(npBorder)
             border_length = max(border_length, calculate_circle_length(npsBorder) * aspect_ratio)
 
-            # Compute curvature
-            curvature = np.zeros(lBorder)
+            # Compute fluorescence
+            fluorescence = np.zeros(lBorder)
             for p in range(lBorder):
-                b = npsBorder[p - dp, :]
                 c = npsBorder[p, :]
-                d = npsBorder[(p + dp) % lBorder, :]
-                mid = (b+d)/2.0
-                if impts[round(mid[0]), round(mid[1])] == 1:
-                    sign = 1.0
-                else:
-                    sign = -1.0
+                n_ones = 0.0
+                flu_sum = 0.0
+                for i in range(c[0] - df, c[0] + df + 1):
+                    if 0 <= i < sx:
+                        for j in range(c[1] - df, c[1] + df + 1):
+                            if 0 <= j < sy:
+                                if impts[i, j] == 1 and (i - c[0])**2 + (j - c[1])**2 <= df*df:
+                                    flu_sum += float(impts_flu[i, j])
+                                    n_ones += 1.0
+                fluorescence[p] = flu_sum/n_ones
 
-                curvature[p] = sign * curvaturePoints(b, c, d)
-
-            # Interpolate curvature to a common length for the relative plot
-            maxg = max(abs(max(curvature)), abs(min(curvature)))
+            # Interpolate fluorescence to a common length for the relative plot
             fac = 1.0
-            curvatureGI = np.interp(np.linspace(0, 1, lCommon), np.linspace(0, 1, lBorder), curvature)
+            fluorescenceGI = np.interp(np.linspace(0, 1, lCommon), np.linspace(0, 1, lBorder), fluorescence)
 
-            Kymograph_abs.append(curvature.copy())
-            Kymograph_rel[:, t] = curvatureGI.copy()
+            Kymograph_abs.append(fluorescence.copy())
+            Kymograph_rel[:, t] = fluorescenceGI.copy()
 
-        # Rearrange the relative kymograph so the highest average of curvature (including sign) is at the center of y axis
-        shift_amount, Kymograph_rel = shift_rows_by_highest_average(Kymograph_rel)
-        with open(path + con_folder + "/shift_amount.csv", 'w', newline='') as csvfile_shift:
-            writer_shift = csv.writer(csvfile_shift)
-            writer_shift.writerow([shift_amount])
-
+        # Rearrange the relative kymograph so the highest average of fluorescence (including sign) is at the center of y axis
+        shift_amount = int(read_single_value_from_csv(path + con_folder + "/shift_amount.csv"))
+        Kymograph_rel = shift_rows(shift_amount, Kymograph_rel)
+        minf = min([min(line) for line in Kymograph_abs])
+        maxf = max([max(line) for line in Kymograph_abs])
 
         kymograph_array = np.full((max_length, lTime), np.nan)
         for i in range(lTime):
@@ -326,7 +295,7 @@ for folder in folders:
         # Plot relative kymograph
         max_abs_value = np.max(np.abs(Kymograph_rel))
 
-        im_rel = ax_rel[w, h].imshow(Kymograph_rel, aspect='auto', vmin=-max_abs_value, vmax=max_abs_value, cmap='bwr',
+        im_rel = ax_rel[w, h].imshow(Kymograph_rel, aspect='auto', vmin=minf, vmax=maxf, cmap='winter',
                                      interpolation='none', extent=[iniTime, iniTime + dt * (lTime-1), 0, 1])
         ax_rel[w, h].set_xlabel('Time (hpf)')
         ax_rel[w, h].set_ylabel('Relative border length')
@@ -337,8 +306,8 @@ for folder in folders:
         ax_abs[w, h].imshow(np.isnan(kymograph_array), cmap='binary', aspect='auto', interpolation='none', alpha=0.5,
                             extent=[iniTime, iniTime + dt * (lTime-1), 0, max_length / aspect_ratio])
 
-        im_abs = ax_abs[w, h].imshow(kymograph_array, cmap='bwr', aspect='auto', interpolation='none',
-                                     vmin=-max_abs_value, vmax=max_abs_value,
+        im_abs = ax_abs[w, h].imshow(kymograph_array, cmap='winter', aspect='auto', interpolation='none',
+                                     vmin=minf, vmax=maxf,
                                      extent=[iniTime, iniTime + dt * (lTime-1), 0, max_length / aspect_ratio])
 
         ax_abs[w, h].set_xlabel('Time (hpf)')
@@ -352,9 +321,8 @@ for folder in folders:
             h += 1
 
     # SAVING KYMOGRAPH COMBINATION
-    fig_abs.savefig(path + "all_kymograph_absolute.pdf")
-    fig_rel.savefig(path + "all_kymograph_relative.pdf")
+    fig_abs.savefig(path + "all_kymograph_flu_absolute.pdf")
+    fig_rel.savefig(path + "all_kymograph_flu_relative.pdf")
     # In case you want to save if as a .png, remove the comment of the lines below
     # fig_rel.savefig(path + "all_kymograph_absolute.png", dpi=300)
     # fig_rel.savefig(path + "all_kymograph_relative.png", dpi=300)
-
